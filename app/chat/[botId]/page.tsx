@@ -4,7 +4,7 @@ import { Suspense, use, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { readJson, rupees, type BotConfig } from '@/lib/shared';
 
-type Msg = { id: number; from: 'me' | 'bot'; text: string; time: string };
+type Msg = { id: number; from: 'me' | 'bot'; text: string; time: string; shield?: string[] };
 
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
@@ -80,7 +80,7 @@ function ChatInner({ botId }: { botId: string }) {
     setInput('');
     setTyping(true);
     try {
-      const res = await readJson<{ reply?: string; balance?: number }>(
+      const res = await readJson<{ reply?: string; balance?: number; privacy?: { found?: string[] } }>(
         await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -88,7 +88,11 @@ function ChatInner({ botId }: { botId: string }) {
         })
       );
       const reply = res.ok && res.data.reply ? res.data.reply : `⚠️ ${res.data.error ?? 'Something went wrong.'}`;
-      setMsgs((m) => [...m, { id: idRef.current++, from: 'bot', text: reply, time: now() }]);
+      const hidden = res.data.privacy?.found ?? [];
+      setMsgs((m) => {
+        const next = hidden.length ? m.map((x, i) => (i === m.length - 1 && x.from === 'me' ? { ...x, shield: hidden } : x)) : m;
+        return [...next, { id: idRef.current++, from: 'bot', text: reply, time: now() }];
+      });
       if (typeof res.data.balance === 'number') setBalance(res.data.balance);
     } catch {
       setMsgs((m) => [...m, { id: idRef.current++, from: 'bot', text: '⚠️ Network error. Please try again.', time: now() }]);
@@ -136,6 +140,11 @@ function ChatInner({ botId }: { botId: string }) {
                     }`}
                   >
                     <Rich text={m.text} />
+                    {m.shield && m.shield.length > 0 && (
+                      <span className="mt-1 block text-[11px] font-medium text-[#008069]">
+                        🔒 Hidden from AI: {m.shield.join(', ')}
+                      </span>
+                    )}
                     <span className="float-right ml-3 mt-1.5 flex items-center gap-1 text-[11px] text-[#667781]">
                       {m.time}
                       {m.from === 'me' && <Ticks />}

@@ -4,6 +4,7 @@ import { generate } from '@/lib/gemini';
 import { db } from '@/lib/supabase';
 import { connection } from 'next/server';
 import { errorResponse } from '@/lib/api';
+import { localShield, shield, shieldLabel } from '@/lib/dlp';
 
 type MenuItem = { name: string; price: number };
 type OrderItem = { name: string; qty: number };
@@ -202,12 +203,17 @@ Rules:
 - Before calling place_order, confirm the items and the total with the customer.
 - Keep replies short, like a WhatsApp message.`;
 
+  // Privacy shield: personal data never reaches Gemini
+  const safe = await shield(String(message ?? ''));
+  const privacy = { found: safe.found.map(shieldLabel), engine: safe.engine };
+
   const contents: Content[] = [
     ...(history ?? []).map((h: { role: string; text: string }) => ({
       role: h.role,
-      parts: [{ text: h.text }],
+      // earlier customer messages: instant pattern shield (the new message also gets Cloud DLP)
+      parts: [{ text: h.role === 'user' ? localShield(String(h.text)).text : h.text }],
     })),
-    { role: 'user', parts: [{ text: message }] },
+    { role: 'user', parts: [{ text: safe.text }] },
   ];
 
   // Let Gemini ask for tools, run them, and give the answers back (max 5 rounds)
@@ -227,6 +233,7 @@ Rules:
       return Response.json({
         reply: response.text,
         balance: Number(c?.wallet_balance ?? 0),
+        privacy,
       });
     }
 

@@ -1,6 +1,7 @@
 import { connection } from 'next/server';
 import { db } from '@/lib/supabase';
 import { errorResponse } from '@/lib/api';
+import { ownerScope, requireSession } from '@/lib/auth';
 
 export async function GET(req: Request) {
   await connection();
@@ -33,6 +34,8 @@ export async function GET(req: Request) {
 // Switch features on or off, or publish the chatbot
 export async function PATCH(req: Request) {
   await connection();
+  const session = requireSession(req);
+  if (session instanceof Response) return session;
   try {
     const { botId, features, published } = await req.json();
     if (!botId) return Response.json({ error: 'Missing botId' }, { status: 400 });
@@ -43,6 +46,11 @@ export async function PATCH(req: Request) {
       .eq('id', botId)
       .single();
     if (error || !bot) return Response.json({ error: 'Chatbot not found' }, { status: 404 });
+
+    const scope = ownerScope(session);
+    if (scope !== null && bot.config?.ownerId !== scope) {
+      return Response.json({ error: 'You do not have access to this chatbot.' }, { status: 403 });
+    }
 
     const current = bot.config?.features ?? {};
     const next = { ...current };

@@ -1,12 +1,16 @@
 import { connection } from 'next/server';
 import { ai, MODEL } from '@/lib/gemini';
 import { db } from '@/lib/supabase';
+import { shield } from '@/lib/dlp';
+import { requireSession } from '@/lib/auth';
 
 // Open /api/health on any deployment to see which part is misconfigured.
 // It never prints secrets, only whether each value is present and well formed.
 // Delete this file after the event.
-export async function GET() {
+export async function GET(req: Request) {
   await connection();
+  const session = requireSession(req);
+  if (session instanceof Response) return session;
 
   const url = process.env.SUPABASE_URL ?? '';
   const serviceKey = process.env.SUPABASE_SERVICE_KEY ?? '';
@@ -50,5 +54,11 @@ export async function GET() {
     return { reply: (r.text ?? '').trim().slice(0, 20) };
   });
 
-  return Response.json({ env, supabase, gemini });
+  // 'cloud-dlp' = Google Cloud Sensitive Data Protection is working. 'local' = built-in pattern shield only.
+  const privacyShield = await check(async () => {
+    const r = await shield('card 4111 1111 1111 1111');
+    return { engine: r.engine, hidden: r.found.length > 0 };
+  });
+
+  return Response.json({ env, supabase, gemini, privacyShield });
 }

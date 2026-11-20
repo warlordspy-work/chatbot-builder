@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import Icon, { type IconName } from './Icon';
+import LogoutButton from './LogoutButton';
 
 export type NavKey = 'overview' | 'chatbots' | 'builder' | 'conversations' | 'orders' | 'menu' | 'analytics' | 'settings';
 
@@ -70,7 +71,7 @@ export default function AppShell({
         <Link href="/" className="mb-6 flex items-center gap-3 px-1 pt-1">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src="/logo-mark.png"
+            src="/logo-mark-sm.png"
             alt=""
             width={44}
             height={44}
@@ -137,7 +138,7 @@ export default function AppShell({
             {/* Brand shown here only when the sidebar is hidden */}
             <Link href="/" className="flex items-center gap-2 lg:hidden" aria-label="Chatbot Builder home">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/logo-mark.png" alt="" width={32} height={32} className="h-8 w-8 rounded-lg bg-white" />
+              <img src="/logo-mark-sm.png" alt="" width={32} height={32} className="h-8 w-8 rounded-lg bg-white" />
             </Link>
             <p className="text-[15px] text-muted">
               Workspace <span className="px-1.5 text-line">/</span>
@@ -149,6 +150,7 @@ export default function AppShell({
               <span className="h-2 w-2 rounded-full bg-brand" aria-hidden="true" />
               Demo mode
             </span>
+            <LogoutButton />
             <span
               className="grid h-9 w-9 place-items-center rounded-full bg-panel-2 text-[12px] font-bold"
               aria-hidden="true"

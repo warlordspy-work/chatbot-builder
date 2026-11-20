@@ -1,6 +1,7 @@
 import { connection } from 'next/server';
 import { generate } from '@/lib/gemini';
 import { errorResponse } from '@/lib/api';
+import { requireSession } from '@/lib/auth';
 
 const ALLOWED = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -8,6 +9,8 @@ const MAX_BYTES = 4 * 1024 * 1024;
 // Gemini reads a photo of a menu and returns "Item price" lines.
 export async function POST(req: Request) {
   await connection();
+  const session = requireSession(req);
+  if (session instanceof Response) return session;
   try {
     const form = await req.formData();
     const file = form.get('menu');

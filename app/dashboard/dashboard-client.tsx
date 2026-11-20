@@ -134,6 +134,10 @@ export default function DashboardClient() {
   const load = useCallback(async () => {
     try {
       const res = await readJson<{ bots?: BotRow[]; orders?: OrderRow[] }>(await fetch('/api/overview', { cache: 'no-store' }));
+      if (res.status === 401) {
+        router.push('/login');
+        return;
+      }
       if (!res.ok) {
         setError({ message: res.data.error ?? 'Could not load your data.', detail: res.data.detail });
       } else {
@@ -146,7 +150,7 @@ export default function DashboardClient() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     const first = setTimeout(load, 0);
@@ -485,9 +489,9 @@ export default function DashboardClient() {
 
       {chatBot && (
         <div role="dialog" aria-modal="true" aria-label={`Test chat with ${botName(chatBot)}`} className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4" onClick={() => setChatBot(null)}>
-          <div className="relative h-[min(720px,92dvh)] w-full max-w-[420px] overflow-hidden rounded-3xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <button type="button" onClick={() => setChatBot(null)} aria-label="Close chat" className="absolute right-3 top-3 z-10 grid h-9 w-9 place-items-center rounded-full bg-black/40 text-white"><Icon name="close" className="h-4 w-4" /></button>
-            <iframe title="Customer chat" src={`/chat/${chatBot.id}?customer=${chatBot.customerId ?? ''}&embed=1`} className="h-full w-full border-0" />
+          <div className="relative h-[min(720px,86dvh)] w-full max-w-[420px]" onClick={(e) => e.stopPropagation()}>
+            <button type="button" onClick={() => setChatBot(null)} aria-label="Close chat" className="absolute -top-12 right-0 flex items-center gap-2 rounded-full bg-panel-2 px-4 py-2 text-[13px] font-semibold text-foreground hover:bg-line"><Icon name="close" className="h-4 w-4" /> Close</button>
+            <iframe title="Customer chat" src={`/chat/${chatBot.id}?customer=${chatBot.customerId ?? ''}&embed=1`} className="h-full w-full overflow-hidden rounded-3xl border-0 shadow-2xl" />
           </div>
         </div>
       )}

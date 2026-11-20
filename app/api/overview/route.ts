@@ -1,10 +1,13 @@
 import { connection } from 'next/server';
 import { db } from '@/lib/supabase';
 import { errorResponse } from '@/lib/api';
+import { ownerScope, requireSession } from '@/lib/auth';
 
 // One call for the whole dashboard: every chatbot plus the latest orders.
-export async function GET() {
+export async function GET(req: Request) {
   await connection();
+  const session = requireSession(req);
+  if (session instanceof Response) return session;
   try {
     const { data: bots, error: botsError } = await db
       .from('bots')
@@ -12,9 +15,11 @@ export async function GET() {
       .order('created_at', { ascending: false })
       .limit(50);
     if (botsError) throw new Error(botsError.message);
+    const scope = ownerScope(session);
+    const mine = (bots ?? []).filter((b) => scope === null || b.config?.ownerId === scope);
 
     const customerByBot: Record<string, string> = {};
-    const ids = (bots ?? []).map((b) => b.id);
+    const ids = mine.map((b) => b.id);
     if (ids.length > 0) {
       const { data: customers, error: customersError } = await db
         .from('customers')
@@ -34,8 +39,8 @@ export async function GET() {
     if (ordersError) throw new Error(ordersError.message);
 
     return Response.json({
-      bots: (bots ?? []).map((b) => ({ ...b, customerId: customerByBot[b.id] ?? null })),
-      orders: orders ?? [],
+      bots: mine.map((b) => ({ ...b, customerId: customerByBot[b.id] ?? null })),
+      orders: (orders ?? []).filter((o) => ids.includes(o.bot_id)),
     });
   } catch (e) {
     return errorResponse(e, 'overview');

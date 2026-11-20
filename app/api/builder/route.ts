@@ -1,5 +1,6 @@
 import { connection } from 'next/server';
 import { generate } from '@/lib/gemini';
+import { requireSession } from '@/lib/auth';
 import { db } from '@/lib/supabase';
 import { errorResponse } from '@/lib/api';
 
@@ -15,6 +16,8 @@ Only turn a feature on if the owner asked for it. Do not invent menu items.`;
 
 export async function POST(req: Request) {
   await connection();
+  const session = requireSession(req);
+  if (session instanceof Response) return session;
   try {
     const { prompt, menuText } = await req.json();
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -50,6 +53,7 @@ ${menuText ?? ''}`,
       vouchers: !!config.features?.vouchers,
     };
     config.menu = Array.isArray(config.menu) ? config.menu : [];
+    config.ownerId = session.u; // who owns this chatbot (per-owner access)
 
     const { data: bot, error } = await db
       .from('bots')
