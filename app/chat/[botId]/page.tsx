@@ -1,341 +1,220 @@
 'use client';
 
-/**
- * WhatsApp-styled Customer Chat Page
- *
- * Provides a conversational ordering experience for customers interacting with an AI chatbot.
- * Features:
- * - Dynamic route parameters (`botId`) and query params (`customerId`) wrapped in Suspense
- * - Initial load of bot configuration and customer wallet balance from `/api/bot`
- * - Greeting bubble display
- * - Multi-turn conversational ordering via `/api/chat`
- * - Live wallet balance updates
- * - WhatsApp-style green header, user & bot bubbles, typing indicator, auto-scroll, and Enter-to-send.
- */
+import { Suspense, use, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { readJson, rupees, type BotConfig } from '@/lib/shared';
 
-import React, { Suspense, useState, useEffect, useRef } from 'react';
-import { useParams, useSearchParams } from 'next/navigation';
-import Link from 'next/link';
+type Msg = { id: number; from: 'me' | 'bot'; text: string; time: string };
 
-/**
- * Message object structure adhering to Gemini chat format
- */
-interface ChatMessage {
-  role: 'user' | 'model';
-  text: string;
+const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+// Renders *bold* and **bold** like WhatsApp does.
+function Rich({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*\n]+\*)/g);
+  return (
+    <>
+      {parts.map((p, i) =>
+        /^\*\*?[^*]+\*\*?$/.test(p) ? <strong key={i}>{p.replace(/^\*+|\*+$/g, '')}</strong> : <span key={i}>{p}</span>
+      )}
+    </>
+  );
 }
 
-/**
- * Bot configuration returned by /api/bot
- */
-interface BotConfig {
-  businessName?: string;
-  greeting?: string;
-  tone?: string;
-  features?: {
-    menuOrdering?: boolean;
-    wallet?: boolean;
-    vouchers?: boolean;
-  };
+function Ticks() {
+  return (
+    <svg viewBox="0 0 16 11" className="inline h-[11px] w-4 text-[#53bdeb]" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 6l3 3 6-7M6 8l1 1 6-7" />
+    </svg>
+  );
 }
 
-/**
- * Inner chat component wrapped by Suspense for client-side search params
- */
-function ChatContent() {
-  const params = useParams();
-  const searchParams = useSearchParams();
+function ChatInner({ botId }: { botId: string }) {
+  const params = useSearchParams();
+  const customerId = params.get('customer') ?? '';
+  const embed = params.get('embed') === '1';
 
-  // Extract botId and customerId
-  const botId = (params?.botId as string) || '';
-  const customerId = searchParams.get('customer') || '';
-
-  // Header & configuration state
-  const [businessName, setBusinessName] = useState<string>('Chatbot');
-  const [walletBalance, setWalletBalance] = useState<number>(0);
-  const [isLoadingBot, setIsLoadingBot] = useState<boolean>(true);
-
-  // Chat messages and interaction state
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [inputValue, setInputValue] = useState<string>('');
-  const [isTyping, setIsTyping] = useState<boolean>(false);
-
-  // Reference for auto-scrolling
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  /**
-   * Smoothly auto-scrolls to the newest message
-   */
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const [config, setConfig] = useState<BotConfig | null>(null);
+  const [balance, setBalance] = useState(0);
+  const [loadError, setLoadError] = useState('');
+  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const [input, setInput] = useState('');
+  const [typing, setTyping] = useState(false);
+  const idRef = useRef(1);
+  const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, isTyping]);
-
-  /**
-   * On initial mount, fetch bot details and customer wallet balance
-   */
-  useEffect(() => {
-    if (!botId) return;
-
-    let isMounted = true;
-
-    async function loadBotData() {
-      setIsLoadingBot(true);
+    let live = true;
+    (async () => {
       try {
-        const res = await fetch(
-          `/api/bot?id=${encodeURIComponent(botId)}&customer=${encodeURIComponent(customerId)}`
+        const res = await readJson<{ config?: BotConfig; balance?: number }>(
+          await fetch(`/api/bot?id=${botId}&customer=${customerId}`)
         );
-        if (!res.ok) return;
-
-        const data: { config?: BotConfig; balance?: number } = await res.json();
-
-        if (isMounted) {
-          if (data.config?.businessName) {
-            setBusinessName(data.config.businessName);
-          }
-          if (typeof data.balance === 'number') {
-            setWalletBalance(data.balance);
-          }
-
-          // Display config.greeting as the first bot bubble
-          if (data.config?.greeting) {
-            setMessages([{ role: 'model', text: data.config.greeting }]);
-          }
+        if (!live) return;
+        if (!res.ok || !res.data.config) {
+          setLoadError(res.data.error ?? 'This chatbot could not be found.');
+          return;
         }
-      } catch (err) {
-        console.error('Failed to load bot configuration:', err);
-      } finally {
-        if (isMounted) {
-          setIsLoadingBot(false);
-        }
+        setConfig(res.data.config);
+        setBalance(res.data.balance ?? 0);
+        setMsgs([{ id: 0, from: 'bot', text: res.data.config.greeting ?? 'Hi! How can I help you today?', time: now() }]);
+      } catch {
+        if (live) setLoadError('Could not load this chatbot. Check your connection.');
       }
-    }
-
-    void loadBotData();
-
+    })();
     return () => {
-      isMounted = false;
+      live = false;
     };
   }, [botId, customerId]);
 
-  /**
-   * Sends the user's message to POST /api/chat
-   */
-  const handleSendMessage = async () => {
-    const trimmed = inputValue.trim();
-    if (!trimmed || isTyping) return;
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [msgs, typing]);
 
-    // Build the user message
-    const userMessage: ChatMessage = { role: 'user', text: trimmed };
-
-    // History is all previous messages EXCEPT the greeting bubble (the 0th message)
-    const history = messages.slice(1);
-
-    // Optimistically append user message to UI
-    setMessages((prev) => [...prev, userMessage]);
-    setInputValue('');
-    setIsTyping(true);
-
+  async function send(text: string) {
+    const t = text.trim();
+    if (!t || typing) return;
+    const history = msgs
+      .filter((m) => m.id !== 0)
+      .map((m) => ({ role: m.from === 'me' ? 'user' : 'model', text: m.text }));
+    setMsgs((m) => [...m, { id: idRef.current++, from: 'me', text: t, time: now() }]);
+    setInput('');
+    setTyping(true);
     try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          botId,
-          customerId,
-          history,
-          message: trimmed,
-        }),
-      });
-
-      const data = await response.json().catch(() => null);
-
-      if (response.ok && data) {
-        // Append bot reply bubble
-        if (data.reply) {
-          setMessages((prev) => [...prev, { role: 'model', text: data.reply }]);
-        }
-
-        // Update wallet balance from returned balance
-        if (typeof data.balance === 'number') {
-          setWalletBalance(data.balance);
-        }
-      } else {
-        const errorText = data?.error || 'Sorry, something went wrong. Please try again.';
-        setMessages((prev) => [...prev, { role: 'model', text: errorText }]);
-      }
-    } catch (err) {
-      console.error('Chat error:', err);
-      setMessages((prev) => [
-        ...prev,
-        { role: 'model', text: 'Network connection failed. Please check your connection and try again.' },
-      ]);
+      const res = await readJson<{ reply?: string; balance?: number }>(
+        await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ botId, customerId, history, message: t }),
+        })
+      );
+      const reply = res.ok && res.data.reply ? res.data.reply : `⚠️ ${res.data.error ?? 'Something went wrong.'}`;
+      setMsgs((m) => [...m, { id: idRef.current++, from: 'bot', text: reply, time: now() }]);
+      if (typeof res.data.balance === 'number') setBalance(res.data.balance);
+    } catch {
+      setMsgs((m) => [...m, { id: idRef.current++, from: 'bot', text: '⚠️ Network error. Please try again.', time: now() }]);
     } finally {
-      setIsTyping(false);
+      setTyping(false);
     }
-  };
+  }
 
-  /**
-   * Handles keyboard press: Enter key sends message
-   */
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void handleSendMessage();
-    }
-  };
+  const name = config?.businessName ?? 'Chatbot';
+  const chips = ['Show menu', 'My wallet balance', 'Any offers?'];
 
   return (
-    <div className="flex h-screen w-full flex-col bg-[#efeae2] dark:bg-zinc-950 font-sans">
-      {/* WhatsApp Green Header */}
-      <header className="flex h-16 items-center justify-between bg-[#075e54] dark:bg-[#005c4b] px-4 py-2 text-white shadow-md z-10">
-        <div className="flex items-center gap-3">
-          {/* Back button */}
-          <Link
-            href="/"
-            aria-label="Back to builder"
-            className="rounded-full p-1 hover:bg-black/10 transition-colors text-white"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-
-          {/* Business Avatar Icon */}
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-800 text-white font-bold text-base shadow-xs uppercase">
-            {businessName.charAt(0) || 'B'}
+    <div className={`flex ${embed ? 'h-dvh' : 'h-dvh sm:py-6'} items-center justify-center bg-[#d1d7db]`}>
+      <div className="flex h-full w-full max-w-[460px] flex-col overflow-hidden bg-[#efeae2] sm:rounded-2xl sm:shadow-2xl">
+        {/* WhatsApp header */}
+        <header className="flex items-center gap-3 bg-[#008069] px-3 py-2.5 text-white">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-white/90 text-[16px] font-bold text-[#008069]">
+            {name.slice(0, 1).toUpperCase()}
+          </span>
+          <div className="min-w-0 flex-1 leading-tight">
+            <p className="truncate text-[16px] font-medium">{name}</p>
+            <p className="text-[12px] text-white/80">{typing ? 'typing…' : 'online'}</p>
           </div>
+          {config?.features?.wallet && (
+            <span className="rounded-full bg-white/15 px-3 py-1 text-[12px] font-semibold">Wallet {rupees(balance)}</span>
+          )}
+        </header>
 
-          {/* Business Name and Online/Typing Status */}
-          <div className="flex flex-col">
-            <h1 className="text-base font-semibold leading-tight line-clamp-1">
-              {businessName}
-            </h1>
-            <span className="text-xs text-emerald-100">
-              {isTyping ? 'typing...' : 'online'}
-            </span>
-          </div>
-        </div>
-
-        {/* Wallet Chip */}
-        <div className="flex items-center">
-          <div className="inline-flex items-center gap-1.5 rounded-full bg-white/20 backdrop-blur-xs px-3 py-1 text-xs sm:text-sm font-semibold text-white border border-white/25 shadow-xs">
-            <svg className="w-4 h-4 text-emerald-200" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4z" />
-              <path fillRule="evenodd" d="M18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zm-4 4a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-            </svg>
-            <span>Wallet: ₹{walletBalance}</span>
-          </div>
-        </div>
-      </header>
-
-      {/* Chat Messages Body */}
-      <main className="flex-1 overflow-y-auto p-4 sm:px-6 space-y-3">
-        {isLoadingBot ? (
-          <div className="flex h-full items-center justify-center">
-            <div className="rounded-lg bg-white/80 dark:bg-zinc-800/80 px-4 py-2 text-xs text-zinc-600 dark:text-zinc-300 shadow-xs">
-              Loading chat...
-            </div>
-          </div>
-        ) : (
-          <>
-            {messages.map((msg, index) => {
-              const isUser = msg.role === 'user';
-              return (
-                <div
-                  key={index}
-                  className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}
-                >
+        {/* Messages */}
+        <div className="wa-wallpaper flex-1 overflow-y-auto px-3 py-3" role="log" aria-live="polite" aria-label="Conversation">
+          {loadError ? (
+            <p role="alert" className="mx-auto mt-10 max-w-xs rounded-lg bg-white p-3 text-center text-[14px] text-[#54656f] shadow">
+              {loadError}
+            </p>
+          ) : (
+            <>
+              <p className="mx-auto mb-3 w-fit rounded-lg bg-[#fff5c4] px-3 py-1 text-[12px] text-[#54656f] shadow-sm">
+                Messages here are from a demo chatbot.
+              </p>
+              {msgs.map((m) => (
+                <div key={m.id} className={`mb-1.5 flex ${m.from === 'me' ? 'justify-end' : 'justify-start'}`}>
                   <div
-                    className={`relative max-w-[82%] sm:max-w-md rounded-2xl px-4 py-2.5 text-sm shadow-xs break-words whitespace-pre-wrap ${
-                      isUser
-                        ? 'bg-[#d9fdd3] dark:bg-[#005c4b] text-zinc-900 dark:text-zinc-50 rounded-tr-none'
-                        : 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-tl-none border border-zinc-200/50 dark:border-zinc-700/50'
+                    className={`max-w-[82%] whitespace-pre-wrap break-words rounded-lg px-2.5 pb-1 pt-1.5 text-[15px] leading-snug text-[#111b21] shadow-sm ${
+                      m.from === 'me' ? 'rounded-tr-none bg-[#d9fdd3]' : 'rounded-tl-none bg-white'
                     }`}
                   >
-                    {msg.text}
+                    <Rich text={m.text} />
+                    <span className="float-right ml-3 mt-1.5 flex items-center gap-1 text-[11px] text-[#667781]">
+                      {m.time}
+                      {m.from === 'me' && <Ticks />}
+                    </span>
                   </div>
                 </div>
-              );
-            })}
-
-            {/* Typing Indicator Bubble */}
-            {isTyping && (
-              <div className="flex w-full justify-start">
-                <div className="relative max-w-[82%] sm:max-w-md rounded-2xl rounded-tl-none bg-white dark:bg-zinc-800 px-4 py-2.5 text-sm text-zinc-500 dark:text-zinc-400 italic shadow-xs border border-zinc-200/50 dark:border-zinc-700/50">
-                  <span className="inline-flex items-center gap-1">
-                    typing...
-                    <span className="flex gap-0.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </span>
-                  </span>
+              ))}
+              {typing && (
+                <div className="mb-1.5 flex">
+                  <div className="flex gap-1 rounded-lg rounded-tl-none bg-white px-3 py-3 shadow-sm" aria-label="Typing">
+                    {[0, 1, 2].map((i) => (
+                      <span key={i} className="h-2 w-2 animate-bounce rounded-full bg-[#8696a0]" style={{ animationDelay: `${i * 150}ms` }} />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+              <div ref={endRef} />
+            </>
+          )}
+        </div>
 
-            {/* Invisible anchor to scroll down */}
-            <div ref={messagesEndRef} />
-          </>
-        )}
-      </main>
-
-      {/* Input Bar */}
-      <footer className="bg-[#f0f2f5] dark:bg-zinc-900 px-4 py-3 border-t border-zinc-200 dark:border-zinc-800">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void handleSendMessage();
-          }}
-          className="flex items-center gap-2 max-w-4xl mx-auto"
-        >
-          <input
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
-            disabled={isTyping || isLoadingBot}
-            className="flex-1 rounded-full bg-white dark:bg-zinc-800 px-4 py-2.5 text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-500 dark:placeholder-zinc-400 border border-zinc-300 dark:border-zinc-700 focus:outline-none focus:ring-2 focus:ring-[#075e54] dark:focus:ring-emerald-500 shadow-inner"
-          />
-
-          <button
-            type="submit"
-            disabled={!inputValue.trim() || isTyping || isLoadingBot}
-            aria-label="Send message"
-            className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[#075e54] dark:bg-emerald-600 text-white shadow-md hover:bg-[#064e46] dark:hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+        {/* Quick replies + input */}
+        <div className="bg-[#f0f2f5]">
+          {!loadError && (
+            <div className="flex gap-2 overflow-x-auto px-3 pt-2">
+              {chips.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => send(c)}
+                  disabled={typing}
+                  className="whitespace-nowrap rounded-full border border-[#d1d7db] bg-white px-3 py-1.5 text-[13px] font-medium text-[#008069] disabled:opacity-50"
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
+          <form
+            className="flex items-center gap-2 px-3 py-2.5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              send(input);
+            }}
           >
-            <svg className="w-5 h-5 ml-0.5" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-            </svg>
-          </button>
-        </form>
-      </footer>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Message"
+              aria-label="Message"
+              disabled={!!loadError}
+              className="min-w-0 flex-1 rounded-full bg-white px-4 py-2.5 text-[15px] text-[#111b21] placeholder:text-[#667781] focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim() || typing}
+              aria-label="Send"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-[#00a884] text-white disabled:opacity-50"
+            >
+              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden="true">
+                <path d="M3 20.5v-6.8l9-1.7-9-1.7V3.5L22 12z" />
+              </svg>
+            </button>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }
 
-/**
- * Root Chat Page export wrapping ChatContent in Suspense as required by useSearchParams
- */
-export default function ChatPage() {
+function Resolved({ params }: { params: Promise<{ botId: string }> }) {
+  const { botId } = use(params);
+  return <ChatInner botId={botId} />;
+}
+
+export default function ChatPage({ params }: { params: Promise<{ botId: string }> }) {
   return (
-    <Suspense
-      fallback={
-        <div className="flex h-screen items-center justify-center bg-[#efeae2] dark:bg-zinc-950 font-sans">
-          <div className="rounded-lg bg-white/80 dark:bg-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-600 dark:text-zinc-300 shadow-xs">
-            Loading chat...
-          </div>
-        </div>
-      }
-    >
-      <ChatContent />
+    <Suspense fallback={<div className="grid h-dvh place-items-center bg-[#efeae2] text-[#54656f]">Loading chat…</div>}>
+      <Resolved params={params} />
     </Suspense>
   );
 }

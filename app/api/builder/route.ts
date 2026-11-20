@@ -1,5 +1,7 @@
-import { ai, MODEL } from '@/lib/gemini';
+import { connection } from 'next/server';
+import { generate } from '@/lib/gemini';
 import { db } from '@/lib/supabase';
+import { errorResponse } from '@/lib/api';
 
 const INSTRUCTIONS = `You set up WhatsApp chatbots for small businesses.
 Read the owner's description and menu. Reply with ONLY a JSON object with these fields:
@@ -12,54 +14,70 @@ Read the owner's description and menu. Reply with ONLY a JSON object with these 
 Only turn a feature on if the owner asked for it. Do not invent menu items.`;
 
 export async function POST(req: Request) {
-  const { prompt, menuText } = await req.json();
+  await connection();
+  try {
+    const { prompt, menuText } = await req.json();
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return Response.json({ error: 'Please describe your business first.' }, { status: 400 });
+    }
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
-    contents: `Owner description:
+    const response = await generate({
+      contents: `Owner description:
 ${prompt}
 
 Menu:
-${menuText}`,
-    config: {
-      systemInstruction: INSTRUCTIONS,
-      responseMimeType: 'application/json',
-    },
-  });
-
-  let config;
-  try {
-    config = JSON.parse(response.text ?? '');
-  } catch {
-    return Response.json(
-      { error: 'Gemini did not return valid JSON. Please try again.' },
-      { status: 502 }
-    );
-  }
-
-  const { data: bot, error } = await db
-    .from('bots')
-    .insert({ owner_prompt: prompt, config })
-    .select()
-    .single();
-  if (error) return Response.json({ error: error.message }, { status: 500 });
-
-  // Save the voucher the owner asked for
-  if (config.voucher) {
-    await db.from('vouchers').insert({
-      bot_id: bot.id,
-      code: String(config.voucher.code).toUpperCase(),
-      percent_off: config.voucher.percentOff,
-      first_order_only: !!config.voucher.firstOrderOnly,
+${menuText ?? ''}`,
+      config: {
+        systemInstruction: INSTRUCTIONS,
+        responseMimeType: 'application/json',
+      },
     });
+
+    let config;
+    try {
+      config = JSON.parse(response.text ?? '');
+    } catch {
+      return Response.json(
+        { error: 'The AI did not return a valid setup. Please try again.' },
+        { status: 502 }
+      );
+    }
+
+    // Make sure the screens always get the shape they expect
+    config.features = {
+      menuOrdering: !!config.features?.menuOrdering,
+      wallet: !!config.features?.wallet,
+      vouchers: !!config.features?.vouchers,
+    };
+    config.menu = Array.isArray(config.menu) ? config.menu : [];
+
+    const { data: bot, error } = await db
+      .from('bots')
+      .insert({ owner_prompt: prompt, config })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+
+    // Save the voucher the owner asked for
+    if (config.voucher && config.voucher.code) {
+      await db.from('vouchers').insert({
+        bot_id: bot.id,
+        code: String(config.voucher.code).toUpperCase(),
+        percent_off: Number(config.voucher.percentOff) || 0,
+        first_order_only: !!config.voucher.firstOrderOnly,
+      });
+    }
+
+    // Create a demo customer with 500 rupees in the wallet
+    const { data: customer, error: customerError } = await db
+      .from('customers')
+      .insert({ bot_id: bot.id, name: 'Demo Customer', wallet_balance: 500 })
+      .select()
+      .single();
+    if (customerError) throw new Error(customerError.message);
+
+    return Response.json({ bot, customer });
+  } catch (e) {
+    return errorResponse(e, 'builder');
   }
-
-  // Create a demo customer with 500 rupees in the wallet
-  const { data: customer } = await db
-    .from('customers')
-    .insert({ bot_id: bot.id, name: 'Demo Customer', wallet_balance: 500 })
-    .select()
-    .single();
-
-  return Response.json({ bot, customer });
 }

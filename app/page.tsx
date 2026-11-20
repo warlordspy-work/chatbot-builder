@@ -1,583 +1,216 @@
 'use client';
 
-/**
- * Chatbot Builder Page
- * 
- * Allows business owners to generate an AI WhatsApp chatbot by providing
- * business description and a text-based menu.
- * Displays generated bot configurations, feature toggles, menu with rupee prices,
- * active voucher codes, a link to open customer chat, and real-time live orders.
- */
+import { useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import AppShell from '@/components/AppShell';
+import Icon from '@/components/Icon';
+import { readJson } from '@/lib/shared';
 
-import React, { useState, useEffect } from 'react';
-import Link from 'next/link';
+const SAMPLE_DESC =
+  'We run a small café called Brew Bay. Take orders from our menu, give 10% off on a first order with code FIRST10, and keep a prepaid wallet for regulars. Be friendly and short.';
+const SAMPLE_MENU = 'Cappuccino 150\nCold Coffee 180\nVeg Sandwich 120\nBrownie 90';
 
-// --- Type Definitions ---
-
-/**
- * Menu item with name and price in rupees
- */
-interface MenuItem {
-  name: string;
-  price: number;
-}
-
-/**
- * Voucher configuration
- */
-interface Voucher {
-  code: string;
-  percentOff?: number;
-  firstOrderOnly?: boolean;
-}
-
-/**
- * Feature flags for the chatbot
- */
-interface BotFeatures {
-  menuOrdering?: boolean;
-  wallet?: boolean;
-  vouchers?: boolean;
-}
-
-/**
- * Bot configuration returned by the AI builder endpoint
- */
-interface BotConfig {
-  businessName?: string;
-  greeting?: string;
-  tone?: string;
-  features?: BotFeatures;
-  menu?: MenuItem[];
-  voucher?: Voucher | null;
-}
-
-/**
- * Bot model returned by Supabase
- */
-interface Bot {
-  id: string | number;
-  owner_prompt?: string;
-  config: BotConfig;
-  created_at?: string;
-}
-
-/**
- * Demo customer model returned by the builder endpoint
- */
-interface Customer {
-  id: string | number;
-  name?: string;
-  wallet_balance?: number;
-  bot_id?: string | number;
-}
-
-/**
- * Represents a single item inside an order
- */
-interface OrderItem {
-  name?: string;
-  item?: string;
-  title?: string;
-  price?: number;
-  quantity?: number;
-  qty?: number;
-}
-
-/**
- * Order record returned by /api/orders
- */
-interface Order {
-  id: string | number;
-  bot_id?: string | number;
-  items?: string | OrderItem[] | Record<string, unknown>;
-  total?: number;
-  total_amount?: number;
-  amount?: number;
-  created_at?: string;
-  time?: string;
-  timestamp?: string;
-}
-
-/**
- * Reusable iOS-style Toggle Switch component
- */
-interface ToggleSwitchProps {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}
-
-function ToggleSwitch({ label, checked, onChange }: ToggleSwitchProps) {
-  return (
-    <div className="flex items-center justify-between py-2">
-      <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-        {label}
-      </span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${
-          checked ? 'bg-emerald-600' : 'bg-zinc-300 dark:bg-zinc-700'
-        }`}
-      >
-        <span className="sr-only">{label}</span>
-        <span
-          aria-hidden="true"
-          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-            checked ? 'translate-x-5' : 'translate-x-0'
-          }`}
-        />
-      </button>
-    </div>
+// Shrink a photo in the browser so uploads stay small and fast.
+async function downscale(file: File): Promise<Blob> {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bmp.width * scale);
+  canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext('2d')!.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not read that image.'))), 'image/jpeg', 0.85)
   );
 }
 
-/**
- * Helper to render order items cleanly whether they are arrays, strings, or JSON objects
- */
-function formatOrderItems(items: Order['items']): string {
-  if (!items) return 'No items';
+export default function BuilderPage() {
+  const router = useRouter();
+  const [desc, setDesc] = useState('');
+  const [menu, setMenu] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState<{ message: string; detail?: string } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  if (typeof items === 'string') {
+  async function onPhoto(file: File | undefined) {
+    if (!file) return;
+    setError(null);
+    setReading(true);
     try {
-      const parsed = JSON.parse(items);
-      return formatOrderItems(parsed);
-    } catch {
-      return items;
-    }
-  }
-
-  if (Array.isArray(items)) {
-    return items
-      .map((item) => {
-        if (typeof item === 'string') return item;
-        if (typeof item === 'object' && item !== null) {
-          const name = item.name || item.item || item.title || 'Item';
-          const qty = item.quantity || item.qty;
-          const price = item.price !== undefined ? ` (₹${item.price})` : '';
-          return qty ? `${name} × ${qty}${price}` : `${name}${price}`;
-        }
-        return String(item);
-      })
-      .join(', ');
-  }
-
-  if (typeof items === 'object') {
-    return Object.entries(items)
-      .map(([key, val]) => `${key}: ${val}`)
-      .join(', ');
-  }
-
-  return String(items);
-}
-
-/**
- * Helper to format order total price with rupee symbol
- */
-function formatOrderTotal(order: Order): string {
-  const total = order.total ?? order.total_amount ?? order.amount;
-  if (total !== undefined && total !== null) {
-    return `₹${total}`;
-  }
-  return '—';
-}
-
-/**
- * Helper to format order creation time into a readable local time string
- */
-function formatOrderTime(order: Order): string {
-  const timeField = order.created_at || order.time || order.timestamp;
-  if (!timeField) return '—';
-
-  try {
-    const date = new Date(timeField);
-    if (isNaN(date.getTime())) {
-      return String(timeField);
-    }
-    return date.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  } catch {
-    return String(timeField);
-  }
-}
-
-// --- Main Chatbot Builder Component ---
-
-export default function ChatbotBuilderPage() {
-  // Input form state
-  const [prompt, setPrompt] = useState<string>('');
-  const [menuText, setMenuText] = useState<string>('');
-
-  // Generation status state
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
-  // Generated bot and demo customer response data
-  const [bot, setBot] = useState<Bot | null>(null);
-  const [customer, setCustomer] = useState<Customer | null>(null);
-
-  // Toggle switch states (initialized from bot.config.features)
-  const [features, setFeatures] = useState<BotFeatures>({
-    menuOrdering: false,
-    wallet: false,
-    vouchers: false,
-  });
-
-  // Orders list state
-  const [orders, setOrders] = useState<Order[]>([]);
-
-  // Capture bot.id for dependency array
-  const botId = bot?.id;
-
-  /**
-   * Set up polling for orders every 5 seconds when a bot is active
-   */
-  useEffect(() => {
-    if (!botId) return;
-
-    let isSubscribed = true;
-
-    async function loadOrders() {
-      try {
-        const response = await fetch(`/api/orders?botId=${encodeURIComponent(botId!)}`);
-        if (!response.ok) return;
-        const data = await response.json().catch(() => null);
-        if (data && isSubscribed) {
-          setOrders(data.orders || []);
-        }
-      } catch (err) {
-        console.error('Error fetching orders:', err);
+      const blob = await downscale(file);
+      const fd = new FormData();
+      fd.append('menu', blob, 'menu.jpg');
+      const res = await readJson<{ menuText?: string }>(await fetch('/api/menu-from-image', { method: 'POST', body: fd }));
+      if (!res.ok || !res.data.menuText) {
+        setError({ message: res.data.error ?? 'Could not read the menu photo.', detail: res.data.detail });
+      } else {
+        setMenu(res.data.menuText);
       }
-    }
-
-    // Trigger initial fetch
-    void loadOrders();
-
-    // Poll every 5 seconds
-    const intervalId = setInterval(() => {
-      void loadOrders();
-    }, 5000);
-
-    return () => {
-      isSubscribed = false;
-      clearInterval(intervalId);
-    };
-  }, [botId]);
-
-  /**
-   * Handle chatbot generation form submission
-   */
-  const handleGenerateChatbot = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsGenerating(true);
-    setErrorMessage(null);
-
-    try {
-      const response = await fetch('/api/builder', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ prompt, menuText }),
-      });
-
-      let data: { bot?: Bot; customer?: Customer; error?: string } | null = null;
-      try {
-        data = await response.json();
-      } catch {
-        // If response is not JSON (e.g., server crash or HTML error page), retrieve text
-        const textFallback = await response.text().catch(() => '');
-        setErrorMessage(
-          textFallback || `Server returned error (${response.status}). Please check API keys and configuration.`
-        );
-        return;
-      }
-
-      if (!response.ok || !data) {
-        setErrorMessage(data?.error || `Server request failed with status ${response.status}.`);
-        return;
-      }
-
-      // Successfully generated chatbot
-      setBot(data.bot ?? null);
-      setCustomer(data.customer ?? null);
-
-      // Reflect bot.config.features in the toggle switches
-      const botFeatures = data.bot?.config?.features || {};
-      setFeatures({
-        menuOrdering: Boolean(botFeatures.menuOrdering),
-        wallet: Boolean(botFeatures.wallet),
-        vouchers: Boolean(botFeatures.vouchers),
-      });
-    } catch (err: unknown) {
-      const errorStr = err instanceof Error ? err.message : 'Network error occurred.';
-      setErrorMessage(errorStr);
+    } catch (e) {
+      setError({ message: e instanceof Error ? e.message : 'Could not read the menu photo.' });
     } finally {
-      setIsGenerating(false);
+      setReading(false);
+      if (fileRef.current) fileRef.current.value = '';
     }
-  };
+  }
+
+  async function generate() {
+    setError(null);
+    if (desc.trim().length < 10) {
+      setError({ message: 'Describe your business in a sentence or two first.' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await readJson<{ bot?: { id: string } }>(
+        await fetch('/api/builder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: desc, menuText: menu }),
+        })
+      );
+      if (!res.ok || !res.data.bot) {
+        setError({ message: res.data.error ?? `Something went wrong (status ${res.status}).`, detail: res.data.detail });
+        return;
+      }
+      try {
+        localStorage.setItem('cb:lastBot', res.data.bot.id);
+      } catch {}
+      router.push(`/dashboard?bot=${res.data.bot.id}&welcome=1`);
+    } catch (e) {
+      setError({ message: e instanceof Error ? e.message : 'Network error. Please try again.' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const field =
+    'w-full rounded-xl border border-line bg-background px-4 py-3 text-[15px] text-foreground placeholder:text-muted/60 focus:border-brand focus:outline-none';
 
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 py-10 px-4 sm:px-6 lg:px-8 font-sans">
-      <div className="max-w-5xl mx-auto space-y-8">
-        {/* Header */}
-        <header className="border-b border-zinc-200 dark:border-zinc-800 pb-5">
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Chatbot Builder
-          </h1>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Describe your business and menu to generate an intelligent WhatsApp ordering chatbot in seconds.
-          </p>
-        </header>
+    <AppShell active="builder" crumb="AI Bot Builder">
+      <p className="text-[12px] font-semibold uppercase tracking-[0.18em] text-brand">No-code workspace</p>
+      <h1 className="mt-2 text-4xl font-bold tracking-tight">AI Bot Builder</h1>
+      <p className="mt-2 text-[16px] text-muted">
+        Describe your business in plain words. Gemini builds your WhatsApp chatbot in seconds.
+      </p>
 
-        {/* Builder Input Section */}
-        <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm p-6 sm:p-8">
-          <form onSubmit={handleGenerateChatbot} className="space-y-6">
-            {/* Business & Chatbot Description Textarea */}
-            <div>
-              <label
-                htmlFor="prompt"
-                className="block text-sm font-semibold text-zinc-800 dark:text-zinc-200 mb-2"
-              >
-                Describe your business and chatbot
-              </label>
-              <textarea
-                id="prompt"
-                rows={4}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="e.g. We are a cozy Italian pizzeria called Bella Napoli. We want a friendly WhatsApp bot that takes customer orders, allows wallet payments, and offers 10% discount voucher for first time orders."
-                required
-                className="w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-4 py-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-colors"
-              />
-            </div>
-
-            {/* Menu Textarea */}
-            <div>
-              <label
-                htmlFor="menuText"
-                className="block text-sm font-semibold text-zinc-800 dark:text-zinc-200 mb-2"
-              >
-                Paste your menu (one item and price per line)
-              </label>
-              <textarea
-                id="menuText"
-                rows={5}
-                value={menuText}
-                onChange={(e) => setMenuText(e.target.value)}
-                placeholder="Margherita Pizza - 299&#10;Farmhouse Pizza - 399&#10;Garlic Breadsticks - 149&#10;Cold Coffee - 99"
-                required
-                className="w-full rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-4 py-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-colors font-mono"
-              />
-            </div>
-
-            {/* Error Message Display */}
-            {errorMessage && (
-              <div
-                role="alert"
-                className="rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 p-4 text-sm text-red-700 dark:text-red-300"
-              >
-                <div className="flex items-center gap-2 font-medium">
-                  <svg className="w-5 h-5 flex-shrink-0 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                  </svg>
-                  <span>{errorMessage}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Submit / Generate Button */}
-            <div>
+      <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="space-y-6">
+          <section className="rounded-3xl border border-line bg-panel p-6">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">
+                <span className="text-muted">01 ·</span> Describe your business
+              </h2>
               <button
-                type="submit"
-                disabled={isGenerating}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                type="button"
+                onClick={() => {
+                  setDesc(SAMPLE_DESC);
+                  setMenu(SAMPLE_MENU);
+                }}
+                className="rounded-lg border border-line px-3 py-1.5 text-[13px] font-semibold text-brand hover:bg-brand-soft"
               >
-                {isGenerating ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Generating...
-                  </>
-                ) : (
-                  'Generate chatbot'
-                )}
+                Use sample café
               </button>
             </div>
-          </form>
-        </section>
+            <label htmlFor="desc" className="mt-4 block text-[13px] font-semibold text-muted">
+              What should your assistant do?
+            </label>
+            <textarea
+              id="desc"
+              rows={5}
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
+              placeholder="We run a bakery in Pune. Take orders, offer 10% off the first order, and let regulars pay from a wallet."
+              className={`${field} mt-2 resize-y`}
+            />
+          </section>
 
-        {/* Results Section: Visible when bot and customer are returned */}
-        {bot && customer && (
-          <div className="space-y-8 animate-fadeIn">
-            {/* Generated Chatbot Details */}
-            <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm p-6 sm:p-8 space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-zinc-200 dark:border-zinc-800 pb-5">
-                <div>
-                  <h2 className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-                    {bot.config?.businessName || 'Business Chatbot'}
-                  </h2>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                    Bot ID: {bot.id} &bull; Demo Customer ID: {customer.id}
-                  </p>
-                </div>
-
-                {/* Open customer chat button */}
-                <div>
-                  <Link
-                    href={`/chat/${bot.id}?customer=${customer.id}`}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 transition-colors"
-                  >
-                    <span>Open customer chat</span>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                  </Link>
-                </div>
-              </div>
-
-              {/* Greeting */}
-              <div className="rounded-lg bg-zinc-50 dark:bg-zinc-950/60 border border-zinc-200 dark:border-zinc-800 p-4">
-                <span className="block text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-1">
-                  Greeting
-                </span>
-                <p className="text-zinc-800 dark:text-zinc-200 italic font-sans text-sm sm:text-base">
-                  &ldquo;{bot.config?.greeting || 'Hello! How can I help you today?'}&rdquo;
-                </p>
-              </div>
-
-              {/* Three Toggle Switches for Features */}
-              <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-4 divide-y divide-zinc-200 dark:divide-zinc-800 bg-white dark:bg-zinc-900">
-                <span className="block text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 mb-2">
-                  Bot Features
-                </span>
-                <ToggleSwitch
-                  label="Menu ordering"
-                  checked={Boolean(features.menuOrdering)}
-                  onChange={(val) => setFeatures((prev) => ({ ...prev, menuOrdering: val }))}
+          <section className="rounded-3xl border border-line bg-panel p-6">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">
+                <span className="text-muted">02 ·</span> Menu & products
+              </h2>
+              <div>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="sr-only"
+                  id="menu-photo"
+                  onChange={(e) => onPhoto(e.target.files?.[0])}
                 />
-                <ToggleSwitch
-                  label="Wallet"
-                  checked={Boolean(features.wallet)}
-                  onChange={(val) => setFeatures((prev) => ({ ...prev, wallet: val }))}
-                />
-                <ToggleSwitch
-                  label="Vouchers"
-                  checked={Boolean(features.vouchers)}
-                  onChange={(val) => setFeatures((prev) => ({ ...prev, vouchers: val }))}
-                />
+                <label
+                  htmlFor="menu-photo"
+                  className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-1.5 text-[13px] font-semibold text-brand hover:bg-brand-soft"
+                >
+                  <Icon name="upload" className="h-4 w-4" />
+                  {reading ? 'Reading photo…' : 'Upload menu photo'}
+                </label>
               </div>
+            </div>
+            <label htmlFor="menu" className="mt-4 block text-[13px] font-semibold text-muted">
+              One item and price per line (or upload a photo and Gemini reads it)
+            </label>
+            <textarea
+              id="menu"
+              rows={6}
+              value={menu}
+              onChange={(e) => setMenu(e.target.value)}
+              placeholder={'Cappuccino 150\nCold Coffee 180'}
+              className={`${field} mt-2 resize-y font-mono text-[14px]`}
+            />
+          </section>
 
-              {/* Voucher Code Display (if any) */}
-              {bot.config?.voucher?.code && (
-                <div className="flex flex-wrap items-center gap-3 p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-lg">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-emerald-800 dark:text-emerald-300">
-                    Voucher Code:
+          {error && (
+            <div role="alert" className="rounded-2xl border border-danger/40 bg-danger-soft p-4 text-[14px]">
+              <p className="font-semibold text-danger">{error.message}</p>
+              {error.detail && <p className="mt-1 break-words font-mono text-[12px] text-muted">{error.detail}</p>}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={generate}
+            disabled={busy || reading}
+            className="inline-flex items-center gap-2 rounded-xl bg-brand px-6 py-3.5 text-[16px] font-bold text-brand-ink hover:bg-brand-strong disabled:opacity-60"
+          >
+            <Icon name="sparkle" className="h-5 w-5" />
+            {busy ? 'Gemini is building your chatbot…' : 'Generate chatbot'}
+          </button>
+        </div>
+
+        <aside className="space-y-6">
+          <section className="rounded-3xl border border-line bg-panel p-6">
+            <h2 className="text-lg font-semibold">How it works</h2>
+            <ol className="mt-4 space-y-4 text-[14px] text-muted">
+              {[
+                ['Describe', 'Say what your business does in plain words.'],
+                ['Gemini builds', 'Name, greeting, menu, wallet and voucher are set up for you.'],
+                ['Test & publish', 'Chat with it in a WhatsApp-style window, then publish.'],
+              ].map(([t, d], i) => (
+                <li key={t} className="flex gap-3">
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-brand-soft text-[13px] font-bold text-brand">
+                    {i + 1}
                   </span>
-                  <span className="inline-block px-3 py-1 bg-white dark:bg-zinc-900 border border-emerald-300 dark:border-emerald-700 rounded-md font-mono font-bold text-emerald-700 dark:text-emerald-300 text-sm tracking-wide shadow-xs">
-                    {bot.config.voucher.code}
+                  <span>
+                    <span className="block font-semibold text-foreground">{t}</span>
+                    {d}
                   </span>
-                  {bot.config.voucher.percentOff !== undefined && (
-                    <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                      ({bot.config.voucher.percentOff}% off
-                      {bot.config.voucher.firstOrderOnly ? ', first order only' : ''})
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* Menu List with prices in rupees */}
-              <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
-                  Menu
-                </h3>
-                {bot.config?.menu && bot.config.menu.length > 0 ? (
-                  <ul className="divide-y divide-zinc-200 dark:divide-zinc-800 rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden bg-white dark:bg-zinc-950">
-                    {bot.config.menu.map((item, index) => (
-                      <li
-                        key={index}
-                        className="flex items-center justify-between px-4 py-3 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
-                      >
-                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
-                          {item.name}
-                        </span>
-                        <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                          ₹{item.price}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-zinc-500 italic">No menu items found.</p>
-                )}
-              </div>
-            </section>
-
-            {/* Orders Section */}
-            <section className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm p-6 sm:p-8 space-y-4">
-              <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 pb-4">
-                <div className="flex items-center gap-2">
-                  <h2 className="text-xl font-bold text-zinc-900 dark:text-zinc-50">
-                    Orders
-                  </h2>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    Auto-updating (5s)
-                  </span>
-                </div>
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {orders.length} {orders.length === 1 ? 'order' : 'orders'}
-                </span>
-              </div>
-
-              {/* Order List */}
-              {orders.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
-                    <thead className="bg-zinc-50 dark:bg-zinc-950 text-xs uppercase tracking-wider text-zinc-500 dark:text-zinc-400 border-b border-zinc-200 dark:border-zinc-800">
-                      <tr>
-                        <th scope="col" className="px-4 py-3">Items</th>
-                        <th scope="col" className="px-4 py-3 text-right">Total</th>
-                        <th scope="col" className="px-4 py-3 text-right">Time</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                      {orders.map((order, idx) => (
-                        <tr
-                          key={order.id ?? idx}
-                          className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40 transition-colors"
-                        >
-                          <td className="px-4 py-3 text-zinc-800 dark:text-zinc-200 font-medium">
-                            {formatOrderItems(order.items)}
-                          </td>
-                          <td className="px-4 py-3 text-right font-semibold text-emerald-600 dark:text-emerald-400">
-                            {formatOrderTotal(order)}
-                          </td>
-                          <td className="px-4 py-3 text-right text-zinc-500 dark:text-zinc-400 font-mono text-xs">
-                            {formatOrderTime(order)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="text-center py-10 text-zinc-500 dark:text-zinc-400 text-sm">
-                  <p>No orders yet. Customer orders will appear here automatically.</p>
-                </div>
-              )}
-            </section>
-          </div>
-        )}
+                </li>
+              ))}
+            </ol>
+          </section>
+          <section className="rounded-3xl border border-line bg-panel p-6">
+            <h2 className="text-lg font-semibold">Deployment status</h2>
+            <p className="mt-3 rounded-xl border border-line bg-background p-3 text-[14px] text-muted">
+              <span className="font-semibold text-foreground">WhatsApp Business API</span>
+              <br />
+              Not connected yet. Chats run in the built-in simulator.
+            </p>
+          </section>
+        </aside>
       </div>
-    </div>
+    </AppShell>
   );
 }

@@ -1,7 +1,9 @@
 import { Type } from '@google/genai';
 import type { Content, Tool } from '@google/genai';
-import { ai, MODEL } from '@/lib/gemini';
+import { generate } from '@/lib/gemini';
 import { db } from '@/lib/supabase';
+import { connection } from 'next/server';
+import { errorResponse } from '@/lib/api';
 
 type MenuItem = { name: string; price: number };
 type OrderItem = { name: string; qty: number };
@@ -126,20 +128,39 @@ async function runTool(
 
     const payWallet = args.pay_with_wallet === true;
     if (payWallet) {
-      const { data: c } = await db
-        .from('customers')
-        .select('wallet_balance')
-        .eq('id', customerId)
-        .single();
-      const balance = Number(c?.wallet_balance ?? 0);
-      if (balance < total) {
-        return { ok: false, reason: 'Not enough wallet balance', balance, total };
+      // Atomic payment through a database function (see the guide, Part 16).
+      const { data: paid, error: rpcError } = await db.rpc('pay_from_wallet', {
+        p_customer: customerId,
+        p_amount: total,
+      });
+      if (rpcError) {
+        // The function has not been created yet: use the simple read-then-write version.
+        const { data: c } = await db
+          .from('customers')
+          .select('wallet_balance')
+          .eq('id', customerId)
+          .single();
+        const balance = Number(c?.wallet_balance ?? 0);
+        if (balance < total) {
+          return { ok: false, reason: 'Not enough wallet balance', balance, total };
+        }
+        await db
+          .from('customers')
+          .update({ wallet_balance: balance - total })
+          .eq('id', customerId);
+      } else if (!paid) {
+        const { data: c } = await db
+          .from('customers')
+          .select('wallet_balance')
+          .eq('id', customerId)
+          .single();
+        return {
+          ok: false,
+          reason: 'Not enough wallet balance',
+          balance: Number(c?.wallet_balance ?? 0),
+          total,
+        };
       }
-      // Fine for a prototype. A real product needs a database transaction here.
-      await db
-        .from('customers')
-        .update({ wallet_balance: balance - total })
-        .eq('id', customerId);
     }
 
     await db.from('orders').insert({
@@ -161,7 +182,7 @@ async function runTool(
  * POST handler for customer chat messages.
  * Orchestrates multi-turn function calling with Gemini and handles tool executions.
  */
-export async function POST(req: Request) {
+async function handleChat(req: Request) {
   const { botId, customerId, history, message } = await req.json();
 
   const { data: bot } = await db
@@ -191,8 +212,7 @@ Rules:
 
   // Let Gemini ask for tools, run them, and give the answers back (max 5 rounds)
   for (let i = 0; i < 5; i++) {
-    const response = await ai.models.generateContent({
-      model: MODEL,
+    const response = await generate({
       contents,
       config: { systemInstruction: system, tools },
     });
@@ -226,4 +246,13 @@ Rules:
   }
 
   return Response.json({ reply: 'Sorry, something went wrong. Please try again.' });
+}
+
+export async function POST(req: Request) {
+  await connection();
+  try {
+    return await handleChat(req);
+  } catch (e) {
+    return errorResponse(e, 'chat');
+  }
 }
